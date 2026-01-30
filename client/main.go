@@ -81,35 +81,86 @@ func getSession(address string) (*smux.Session, error) {
 	if globalSession != nil && !globalSession.IsClosed() {
 		return globalSession, nil
 	}
-	crypt, _ := common.GetBlockCrypt(getCurrentKey())
-	kcpConn, err := kcp.DialWithOptions(address, crypt, 10, 3)
-	if err != nil {
-		return nil, err
+
+	type connResult struct {
+		session *smux.Session
+		err     error
 	}
-	common.ConfigKCP(kcpConn)
+	resultCh := make(chan connResult, 1)
 
-	// 设置连接超时，快速检测密钥是否正确
-	kcpConn.SetDeadline(time.Now().Add(connectionTimeout))
+	// 使用 context 控制超时，确保超时时能清理资源
+	ctx, cancel := context.WithTimeout(context.Background(), connectionTimeout)
+	defer cancel() // 确保 context 总是被取消
 
-	session, err := smux.Client(kcpConn, common.SmuxConfig())
-	if err != nil {
-		kcpConn.Close()
-		return nil, err
+	go func() {
+		crypt, _ := common.GetBlockCrypt(getCurrentKey())
+		kcpConn, err := kcp.DialWithOptions(address, crypt, 10, 3)
+		if err != nil {
+			resultCh <- connResult{err: err}
+			return
+		}
+		common.ConfigKCP(kcpConn)
+
+		session, err := smux.Client(kcpConn, common.SmuxConfig())
+		if err != nil {
+			kcpConn.Close()
+			resultCh <- connResult{err: err}
+			return
+		}
+
+		// 打开一个测试流
+		testStream, err := session.OpenStream()
+		if err != nil {
+			session.Close()
+			resultCh <- connResult{err: fmt.Errorf("open stream failed: %w", err)}
+			return
+		}
+
+		// 关键：设置流的超时，并进行实际的网络通信来验证连接
+		testStream.SetDeadline(time.Now().Add(connectionTimeout))
+
+		// 发送一个简单的 HTTP HEAD 请求
+		_, err = testStream.Write([]byte("HEAD / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"))
+		if err != nil {
+			testStream.Close()
+			session.Close()
+			resultCh <- connResult{err: fmt.Errorf("connection failed: %w", err)}
+			return
+		}
+
+		// 读取响应 - 这是真正验证连接的地方
+		// 如果密钥错误，服务端无法解密数据，不会响应，Read 会超时
+		buf := make([]byte, 1)
+		_, err = testStream.Read(buf)
+		testStream.Close()
+		if err != nil {
+			session.Close()
+			resultCh <- connResult{err: fmt.Errorf("connection failed (possibly wrong key): %w", err)}
+			return
+		}
+
+		// 检查是否已超时取消
+		select {
+		case <-ctx.Done():
+			// 已超时，清理资源
+			session.Close()
+			return
+		case resultCh <- connResult{session: session}:
+			// 成功发送结果
+		}
+	}()
+
+	// 等待连接结果或超时
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			return nil, result.err
+		}
+		globalSession = result.session
+		return result.session, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("connection timeout (server unreachable or wrong key)")
 	}
-
-	// 尝试打开一个流来验证连接是否正常（密钥是否匹配）
-	testStream, err := session.OpenStream()
-	if err != nil {
-		session.Close()
-		return nil, fmt.Errorf("connection failed (possibly wrong key): %w", err)
-	}
-	testStream.Close()
-
-	// 连接成功，清除超时限制
-	kcpConn.SetDeadline(time.Time{})
-
-	globalSession = session
-	return session, nil
 }
 
 func newKCPHTTPClient(serverAddr string) *http.Client {
