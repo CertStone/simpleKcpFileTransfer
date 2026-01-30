@@ -4,8 +4,10 @@
 *.dll
 *.so
 *.dylib
-client
-server
+/client
+/server
+!/client/
+!/server/
 
 # Build output
 dist/
