@@ -2,6 +2,8 @@
 
 简单的基于 KCP 协议的高速文件传输工具。
 
+> **声明**：该项目的初衷是实现类似 `python -m http.server` 那样的**简单**的文件传输工具，所以不会为其增加太复杂的功能，如果需要像是SFTP那样的客户端和服务端双向传输的工具，请参考<a href="https://github.com/CertStone/simpleKcpFileManager">simpleKcpFileManager</a>
+
 ## ✨ 特性
 
 - **KCP 协议**：基于 UDP 的可靠传输，比 TCP 更快，适合高延迟、高丢包网络
